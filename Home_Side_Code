@@ -1,0 +1,83 @@
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+// ---------------- nRF24L01 Config ------------
+#define CE_PIN  4
+#define CSN_PIN 5
+RF24 radio(CE_PIN, CSN_PIN);
+const byte address[6] = "GLV01";
+
+// ---------------- Relay Output Pins ----------
+#define RELAY_LIGHT 26 // Connect to Relay Channel 1
+#define RELAY_FAN   27 // Connect to Relay Channel 2
+
+// Active LOW relay definitions (Standard for most relay boards)
+#define RELAY_ON    LOW
+#define RELAY_OFF   HIGH
+
+// ---------------- Data Packet Definition -----
+struct PacketData {
+  uint8_t gestureID;
+  uint8_t heartRate;
+};
+PacketData receivedData;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize Relays as OFF
+  pinMode(RELAY_LIGHT, OUTPUT);
+  pinMode(RELAY_FAN, OUTPUT);
+  digitalWrite(RELAY_LIGHT, RELAY_OFF);
+  digitalWrite(RELAY_FAN, RELAY_OFF);
+
+  // Initialize nRF24L01 Receiver
+  if (!radio.begin()) {
+    Serial.println("nRF24L01 Receiver hardware failure.");
+  }
+  radio.openReadingPipe(0, address);
+  radio.setPALevel(RF24_PA_HIGH);
+  radio.setDataRate(RF24_250KBPS);
+  radio.startListening();
+
+  Serial.println("Receiver Ready. Listening for glove commands...");
+}
+
+void loop() {
+  if (radio.available()) {
+    radio.read(&receivedData, sizeof(PacketData));
+
+    Serial.print("Received Gesture ID: ");
+    Serial.print(receivedData.gestureID);
+    Serial.print(" | Glove Heart Rate: ");
+    Serial.println(receivedData.heartRate);
+
+    // Switch appliances based on received ID
+    switch (receivedData.gestureID) {
+      case 3: // Light ON
+        digitalWrite(RELAY_LIGHT, RELAY_ON);
+        Serial.println("Appliance: LIGHT turned ON");
+        break;
+
+      case 4: // Light OFF
+        digitalWrite(RELAY_LIGHT, RELAY_OFF);
+        Serial.println("Appliance: LIGHT turned OFF");
+        break;
+
+      case 5: // Fan ON
+        digitalWrite(RELAY_FAN, RELAY_ON);
+        Serial.println("Appliance: FAN turned ON");
+        break;
+
+      case 6: // Fan OFF
+        digitalWrite(RELAY_FAN, RELAY_OFF);
+        Serial.println("Appliance: FAN turned OFF");
+        break;
+
+      default:
+      
+        break;
+    }
+  }
+}
