@@ -1,0 +1,176 @@
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <DFRobotDFPlayerMini.h>
+#include "BluetoothSerial.h"
+
+// ---------------- OLED Config ----------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ---------------- Bluetooth Config -----------
+BluetoothSerial SerialBT;
+
+// ---------------- nRF24L01 Config ------------
+#define CE_PIN  4
+#define CSN_PIN 5
+RF24 radio(CE_PIN, CSN_PIN);
+const byte address[6] = "GLV01";
+
+// ---------------- DFPlayer Mini Config -------
+// Uses ESP32 HardwareSerial 2
+#define DFPLAYER_RX 16 // Connect to DFPlayer TX
+#define DFPLAYER_TX 17 // Connect to DFPlayer RX via 1k resistor
+HardwareSerial dfSerial(2);
+DFRobotDFPlayerMini myDFPlayer;
+
+// ---------------- Flex Sensors Config --------
+// ADC1 pins (ADC2 cannot be used while Wi-Fi/BT is active)
+#define FLEX_THUMB   36 // VP
+#define FLEX_INDEX   39 // VN
+#define FLEX_MIDDLE  34
+#define FLEX_RING    35
+#define FLEX_LITTLE  32
+
+// Calibrated threshold: values above this mean finger is bent
+// Adjust based on your voltage-divider resistor (typically 10k to 47k)
+const int BEND_THRESHOLD = 2300; 
+
+// ---------------- Data Packet Definition -----
+struct PacketData {
+  uint8_t gestureID;   // 1: Need Water, 2: Need Food, 3: Light ON, 4: Light OFF, 5: Fan ON, 6: Fan OFF
+  uint8_t heartRate;   // Simulated BPM
+};
+PacketData sendData;
+
+// ---------------- Timing Variables -----------
+unsigned long lastHRUpdate = 0;
+unsigned long lastGestureCheck = 0;
+uint8_t currentHR = 78;
+int lastGestureID = -1;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize Bluetooth
+  SerialBT.begin("SmartGlove_ESP32");
+  Serial.println("Bluetooth started as 'SmartGlove_ESP32'");
+
+  // Initialize OLED (I2C default pins: SDA=21, SCL=22)
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED init failed!");
+  }
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(10, 20);
+  display.println("Smart Glove Initializing");
+  display.display();
+
+  // Initialize DFPlayer Mini
+  dfSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
+  if (!myDFPlayer.begin(dfSerial)) {
+    Serial.println("DFPlayer Mini offline. Check SD Card.");
+  } else {
+    myDFPlayer.volume(25); // Volume (0 - 30)
+  }
+
+  // Initialize nRF24L01 (Default VSPI: SCK=18, MISO=19, MOSI=23)
+  if (!radio.begin()) {
+    Serial.println("nRF24L01 radio not responding.");
+  }
+  radio.openWritingPipe(address);
+  radio.setPALevel(RF24_PA_HIGH);
+  radio.setDataRate(RF24_250KBPS);
+  radio.stopListening();
+
+  delay(1000);
+  display.clearDisplay();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // 1. Update Simulated Heart Rate every 3 seconds
+  if (currentMillis - lastHRUpdate >= 3000) {
+    lastHRUpdate = currentMillis;
+    currentHR = random(75, 91); // Generates between 75 and 90
+
+    // Transmit to Android over Bluetooth
+    SerialBT.print("BPM: ");
+    SerialBT.println(currentHR);
+  }
+
+  // 2. Gesture Evaluation & Action every 350 ms
+  if (currentMillis - lastGestureCheck >= 350) {
+    lastGestureCheck = currentMillis;
+
+    // Read analog values
+    bool thumb  = analogRead(FLEX_THUMB)  > BEND_THRESHOLD;
+    bool index  = analogRead(FLEX_INDEX)  > BEND_THRESHOLD;
+    bool middle = analogRead(FLEX_MIDDLE) > BEND_THRESHOLD;
+    bool ring   = analogRead(FLEX_RING)   > BEND_THRESHOLD;
+    bool little = analogRead(FLEX_LITTLE) > BEND_THRESHOLD;
+
+    int detectedGesture = 0;
+    String gestureText = "Idle / Open Hand";
+
+    // Gesture definitions based on bent fingers:
+    if (index && !middle && !ring && !little) {
+      detectedGesture = 1;
+      gestureText = "Need Water";
+    } else if (index && middle && !ring && !little) {
+      detectedGesture = 2;
+      gestureText = "Need Food";
+    } else if (thumb && !index && !middle && !ring && !little) {
+      detectedGesture = 3;
+      gestureText = "Light ON";
+    } else if (thumb && index && !middle && !ring && !little) {
+      detectedGesture = 4;
+      gestureText = "Light OFF";
+    } else if (little && !ring && !middle && !index && !thumb) {
+      detectedGesture = 5;
+      gestureText = "Fan ON";
+    } else if (ring && little && !middle && !index && !thumb) {
+      detectedGesture = 6;
+      gestureText = "Fan OFF";
+    }
+
+    // Execute actions when gesture changes and is not idle
+    if (detectedGesture != 0 && detectedGesture != lastGestureID) {
+      lastGestureID = detectedGesture;
+
+      // Play voice prompt (MP3 tracks 0001.mp3 to 0006.mp3 on SD card)
+      myDFPlayer.play(detectedGesture);
+
+      // Transmit to Home Receiver via nRF24L01
+      sendData.gestureID = detectedGesture;
+      sendData.heartRate = currentHR;
+      radio.write(&sendData, sizeof(PacketData));
+    } else if (detectedGesture == 0) {
+      lastGestureID = 0;
+    }
+
+    // Update OLED Display
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Demo HR: ");
+    display.print(currentHR);
+    display.println(" BPM");
+
+    display.drawLine(0, 12, 128, 12, WHITE);
+
+    display.setCursor(0, 20);
+    display.print("Status: ");
+    display.println(gestureText);
+
+    display.setCursor(0, 48);
+    display.print("BT & RF24: Active");
+    display.display();
+  }
+}
